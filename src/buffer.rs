@@ -164,4 +164,83 @@ impl BufferPoolManager {
         self.page_table.insert(page_id, buffer_id);
         Ok(page)
     }
+
+    pub fn create_page(&mut self) -> Result<Rc<Buffer>, Error> {
+        let buffer_id = self.buffer_pool.evict().ok_or(Error::NoFreeBuffer)?;
+        let available_frame = &mut self.buffer_pool[buffer_id];
+        let evict_page_id = available_frame.buffer.page_id;
+        let page_id = {
+            let available_buffer = Rc::get_mut(&mut available_frame.buffer).unwrap();
+            if available_buffer.is_dirty.get() {
+                self.disk_manager.write_page_data(evict_page_id, available_buffer.page.get_mut())?;
+            }
+            let page_id = self.disk_manager.allocate_page();
+            *available_buffer = Buffer::default();
+            available_buffer.page_id = page_id;
+            available_buffer.is_dirty.set(true);
+            available_frame.used_count = 1;
+            page_id
+        };
+        let page = Rc::clone(&available_frame.buffer);
+        // Updating the page table
+        self.page_table.remove(&evict_page_id);
+        self.page_table.insert(page_id, buffer_id);
+        Ok(page)
+    }
+
+    pub fn flush(&mut self) -> Result<(), Error> {
+        for (&page_id, &buffer_id) in self.page_table.iter() {
+            let frame = &self.buffer_pool[buffer_id];
+            let mut page = frame.buffer.page.borrow_mut();
+            self.disk_manager.write_page_data(page_id, page.as_mut())?;
+            frame.buffer.is_dirty.set(false);
+        }
+        self.disk_manager.sync()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::disk;
+
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test() {
+        // create temp file
+        let (data_file, data_file_path) = NamedTempFile::new().unwrap().into_parts();
+        let mut disk_manager = DiskManager::new(data_file).unwrap();
+        // NOTE: allocate heap memory.
+        //       Vec::with_capasity creates a vector with the given capasity but with zero length.
+        //       (capasity: 4096, length: 0)
+        //       https://stackoverflow.com/questions/27175685/how-to-allocate-space-for-a-vect-in-rust
+        let mut hello = Vec::with_capacity(PAGE_SIZE);
+        // NOTE: b"foo" is a byte string expression
+        //       (capasity: 4096, length: 5)
+        hello.extend_from_slice(b"hello");
+        // zero padding
+        // NOTE: (capasity: 4096, length: 4096)
+        hello.resize(PAGE_SIZE, 0);
+        // allocate page on disk
+        let hello_page_id = disk_manager.allocate_page();
+        disk_manager.write_page_data(hello_page_id, &hello).unwrap();
+        // allocate another heap memory
+        let mut world = Vec::with_capacity(PAGE_SIZE);
+        world.extend_from_slice(b"world");
+        world.resize(PAGE_SIZE, 0);
+        let world_page_id = disk_manager.allocate_page();
+        disk_manager.write_page_data(world_page_id, &world).unwrap();
+        // remove disk manager
+        drop(disk_manager);
+        // create new disk manager
+        let mut disk_manager2 = DiskManager::open(&data_file_path).unwrap();
+        // NOTE: (capasity:4096, length:4096)
+        let mut buffer = vec![0; PAGE_SIZE];
+        disk_manager2.read_page_data(hello_page_id, &mut buffer).unwrap();
+        assert_eq!(hello, buffer);
+        disk_manager2.read_page_data(world_page_id, &mut buffer).unwrap();
+        assert_eq!(world, buffer);
+    }
 }
