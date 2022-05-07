@@ -91,6 +91,12 @@ impl DiskManager {
         // write data
         self.heap_file.write_all(data)
     }
+
+    pub fn sync(&mut self) -> io::Result<()> {
+        // NOTE: ? operator early returns an Err(e)
+        self.heap_file.flush()?;
+        self.heap_file.sync_all()
+    }
 }
 
 #[cfg(test)]
