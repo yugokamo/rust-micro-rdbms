@@ -202,8 +202,6 @@ impl BufferPoolManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::disk;
-
     use super::*;
     use tempfile::NamedTempFile;
 
